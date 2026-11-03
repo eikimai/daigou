@@ -1,9 +1,14 @@
-// 離線快取：先用手機上的檔案，背景再更新（下次開啟生效）
-const V = 'daigou-v1';
-const FILES = ['./', './index.html', './manifest.webmanifest', './icon-180.png', './icon-192.png', './icon-512.png'];
+// 離線快取：安裝時一次把整組檔案抓齊，之後都從手機上的版本開啟。
+// 有新版本時（改了這個檔的版本號），背景下載整組新檔，下次開啟才換，不會新舊混用。
+const V = 'daigou-1.1.0';
+const FILES = ['./', './index.html', './app.js', './cards.js', './manifest.webmanifest', './icon-180.png', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', e => {
-  e.waitUntil(caches.open(V).then(c => c.addAll(FILES)).then(() => self.skipWaiting()));
+  e.waitUntil(
+    caches.open(V)
+      .then(c => Promise.all(FILES.map(f => fetch(new Request(f, { cache: 'reload' })).then(r => { if (!r.ok) throw new Error(f); return c.put(f, r); }))))
+      .then(() => self.skipWaiting())
+  );
 });
 
 self.addEventListener('activate', e => {
@@ -18,10 +23,7 @@ self.addEventListener('fetch', e => {
   const r = e.request;
   if (r.method !== 'GET') return;
   if (new URL(r.url).origin !== location.origin) return; // 匯率 API 等外部請求不經過快取
-  e.respondWith((async () => {
-    const c = await caches.open(V);
-    const hit = await c.match(r, { ignoreSearch: true });
-    const net = fetch(r).then(res => { if (res.ok) c.put(r, res.clone()); return res; }).catch(() => null);
-    return hit || (await net) || (await c.match('./index.html'));
-  })());
+  e.respondWith(
+    caches.match(r, { ignoreSearch: true }).then(hit => hit || fetch(r).catch(() => caches.match('./index.html')))
+  );
 });
