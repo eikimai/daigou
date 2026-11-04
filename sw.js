@@ -1,6 +1,6 @@
 // 離線快取：安裝時一次把整組檔案抓齊，之後都從手機上的版本開啟。
 // 有新版本時（改了這個檔的版本號），背景下載整組新檔，下次開啟才換，不會新舊混用。
-const V = 'daigou-1.2.0';
+const V = 'daigou-1.3.0';
 const FILES = ['./', './index.html', './app.js', './cards.js', './manifest.webmanifest', './icon-180.png', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', e => {

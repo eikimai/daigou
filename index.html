@@ -42,7 +42,8 @@ button{cursor:pointer}
 header{position:sticky;top:0;z-index:5;background:var(--bg);display:flex;gap:10px;align-items:center;
   padding:calc(10px + env(safe-area-inset-top,0px)) 16px 10px;border-bottom:1px solid var(--line)}
 header select{flex:1;min-width:0;font-weight:600;font-size:16px;padding:9px 12px;border-radius:10px;border:1px solid var(--line);background:var(--surface)}
-header .brand{font-weight:800;letter-spacing:.02em}
+header .brand{font-weight:800;letter-spacing:.02em;display:flex;align-items:center;gap:8px;white-space:nowrap}
+header .logo{width:30px;height:30px;flex:none}
 main{padding:14px 16px 64px;display:flex;flex-direction:column;gap:10px}
 nav{position:fixed;left:0;right:0;bottom:0;z-index:6;background:var(--surface);border-top:1px solid var(--line);
   padding-bottom:env(safe-area-inset-bottom,0px)}

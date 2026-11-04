@@ -1,5 +1,5 @@
 'use strict';
-const VERSION='1.2.0';
+const VERSION='1.3.0';
 /* ========== 基本設定 ========== */
 const CUR={
   JPY:{sym:'¥',name:'日幣',dec:0,hint:1000,def:0.205},
@@ -69,6 +69,16 @@ const varPrice=(it,v,t)=>{
   if(v&&num(v.c)>0)return calcPrice(num(v.c)*t.rate,it.mode,num(it.val),t.round);
   return it.price||0;
 };
+/* 代購費率：售價 = 成本（台幣）×（1＋費率%）。手動固定的售價不受費率影響 */
+const DEF_FEE=10;
+const cleanRate=x=>{const n=Number(x);return isFinite(n)&&n>=0&&n<=300?Math.round(n*100)/100:DEF_FEE};
+const custRate=id=>{const c=S.customers.find(x=>x.id===id);return c&&c.rate!=null?cleanRate(c.rate):DEF_FEE};
+function feePrice(it,v,t,rate){
+  if(v&&num(v.p)>0)return num(v.p);
+  if(!v&&it.manual&&num(it.price)>0)return num(it.price);
+  const c=varCost(it,v,t);
+  return c>0?calcPrice(c,'mult',1+rate/100,t.round):(it.price||0);
+}
 /* 從規格名稱讀出容量，例如「100ml」「1.5L」「30片」，用來算每單位多少錢 */
 const SIZE_RE=/(\d+(?:\.\d+)?)\s*(ml|cc|l|公升|kg|公斤|g|克|入|片|枚|個|个|包|支|顆|粒|條|pcs|sheets?)(?![a-z])/i;
 function parseSize(name){
@@ -118,12 +128,13 @@ $('#sheetWrap').addEventListener('click',e=>{if(e.target.id==='sheetWrap')closeS
 const shHead=t=>`<div class="sh-head"><h3>${t}</h3><button class="x" data-act="close">關閉</button></div>`;
 
 /* ========== 畫面 ========== */
+const LOGO='<svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#2a8cf0"/><stop offset="1" stop-color="#0a56ad"/></linearGradient></defs><rect width="32" height="32" rx="9" fill="url(#lg)"/><path d="M8.6 12h14.8l1 11.6a2 2 0 0 1-2 2.2H9.6a2 2 0 0 1-2-2.2z" fill="#fff"/><path d="M11.4 12.4C11.4 6.6 20.6 6.6 20.6 12.4" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round"/><path d="M11.2 19.6L21 15.4l-3.3 8.4-2-3.6z" fill="#0b6bcb"/><path d="M15.7 20.2L21 15.4" stroke="#fff" stroke-width=".9" stroke-linecap="round"/></svg>';
 function render(){
   const t=curTrip();
   const todo=t?S.items.filter(i=>i.tripId===t.id&&!i.bought).length:0;
   const open=t?S.orders.filter(o=>o.tripId===t.id&&(!o.shipped||payState(o)[0]!=='paid')).length:0;
   const tabs=[['items','商品',todo],['orders','訂單',open],['customers','顧客',0],['trips','行程',0],['rates','匯率',0]];
-  const hd=`<header><span class="brand">代購帳</span>${t?`<select id="tripSel" aria-label="目前行程">${S.trips.map(x=>`<option value="${x.id}"${x.id===t.id?' selected':''}>${esc(x.name)}（${x.currency}）</option>`).join('')}</select>`:'<span class="grow sub">先建立一趟行程</span>'}
+  const hd=`<header><span class="brand">${LOGO}代購帳</span>${t?`<select id="tripSel" aria-label="目前行程">${S.trips.map(x=>`<option value="${x.id}"${x.id===t.id?' selected':''}>${esc(x.name)}（${x.currency}）</option>`).join('')}</select>`:'<span class="grow sub">先建立一趟行程</span>'}
     <button class="btn sm" data-act="converter">換算</button></header>`;
   let body;
   if(!t&&ui.tab!=='rates'&&ui.tab!=='trips')body=welcome();
@@ -205,7 +216,7 @@ function viewCustomers(){
   return (list.length?list.map(c=>{
     const os=S.orders.filter(o=>o.customerId===c.id),tot=os.reduce((s,o)=>s+orderTotal(o),0),due=os.reduce((s,o)=>s+orderTotal(o)-Math.min(o.paid||0,orderTotal(o)),0);
     return `<div class="card row" data-act="editCustomer" data-id="${c.id}"><div class="grow"><div class="nm">${esc(c.name)}</div>
-      <div class="sub">${esc(c.contact||'')}${c.contact?' · ':''}${os.length} 筆訂單</div></div>
+      <div class="sub">${esc(c.contact||'')}${c.contact?' · ':''}${os.length} 筆訂單 · 費率 +${c.rate!=null?cleanRate(c.rate):DEF_FEE}%</div></div>
       <div style="text-align:right"><b>${twd(tot)}</b>${due>0?`<div class="sub" style="color:var(--bad)">待收 ${twd(due)}</div>`:''}</div></div>`;
   }).join(''):`<div class="empty">還沒有顧客。<br>建立訂單時也可以直接新增。</div>`)+`<button class="fab" data-act="newCustomer">＋ 新增顧客</button>`;
 }
@@ -254,7 +265,7 @@ const swText=()=>swOK===true?'離線模式已就緒，沒有網路也能開啟�
 /* ========== 行程表單 ========== */
 function tripSheet(id){
   const ex=id?S.trips.find(x=>x.id===id):null;
-  const t=ex?JSON.parse(JSON.stringify(ex)):{id:uid(),name:'',currency:'JPY',rate:S.meta.rates.JPY,round:10,mode:'mult',defaults:{mult:1.3,add:100,margin:25},createdAt:Date.now()};
+  const t=ex?JSON.parse(JSON.stringify(ex)):{id:uid(),name:'',currency:'JPY',rate:S.meta.rates.JPY,round:10,mode:'mult',defaults:{mult:1.1,add:100,margin:25},createdAt:Date.now()};
   const s=openSheet(shHead(ex?'編輯行程':'新增行程')+`
     <label class="f"><span>行程名稱</span><input id="tName" value="${esc(t.name)}" placeholder="例：2026/12 首爾 Olive Young"></label>
     <div class="two"><label class="f"><span>幣別</span><select id="tCur">${Object.keys(CUR).map(k=>`<option value="${k}"${k===t.currency?' selected':''}>${k} ${CUR[k].name}</option>`).join('')}</select></label>
@@ -418,15 +429,17 @@ function orderSheet(id){
   const items=S.items.filter(i=>i.tripId===t.id);
   if(!ex&&!items.length){toast('先新增商品，才能建立訂單');return}
   const o=ex?JSON.parse(JSON.stringify(ex)):{id:uid(),tripId:t.id,customerId:(S.customers[0]||{}).id||'__new',lines:[],paid:0,shipped:false,note:'',createdAt:Date.now()};
+  let rate=ex?(ex.rate!=null?cleanRate(ex.rate):custRate(ex.customerId)):custRate(o.customerId);
   // 規格剩餘數量：編輯舊訂單時，要把這張訂單原本佔用的數量加回來
   const leftOf=(itm,vn)=>{const v=(itm.variants||[]).find(x=>x.n===vn);if(!v)return 0;
     const own=ex?ex.lines.filter(l=>l.itemId===itm.id&&(l.variant||'')===vn).reduce((s,l)=>s+l.qty,0):0;return v.q-soldQty(itm.id,vn)+own};
   const defVariant=itm=>{const vs=itm.variants||[];const f=vs.find(v=>leftOf(itm,v.n)>0)||vs[0];return f?f.n:''};
   const itemOpts=sel=>items.map(i=>`<option value="${i.id}"${i.id===sel?' selected':''}>${esc(i.name)}</option>`).join('');
-  const varOpts=(itm,sel)=>(itm.variants||[]).map(v=>`<option value="${esc(v.n)}"${v.n===sel?' selected':''}>${esc(v.n)} · NT$ ${fmt(varPrice(itm,v,t))}（剩 ${leftOf(itm,v.n)}）</option>`).join('');
+  const varOpts=(itm,sel)=>(itm.variants||[]).map(v=>`<option value="${esc(v.n)}"${v.n===sel?' selected':''}>${esc(v.n)} · NT$ ${fmt(feePrice(itm,v,t,rate))}（剩 ${leftOf(itm,v.n)}）</option>`).join('');
   openSheet(shHead(ex?'編輯訂單':'新增訂單')+`
     <label class="f"><span>顧客</span><select id="oCust">${S.customers.map(c=>`<option value="${c.id}"${c.id===o.customerId?' selected':''}>${esc(c.name)}</option>`).join('')}<option value="__new"${o.customerId==='__new'?' selected':''}>＋ 新顧客</option></select></label>
     <label class="f" id="newCustBox" style="display:none"><span>新顧客名稱</span><input id="oNewName" placeholder="姓名或 LINE 暱稱"></label>
+    <div class="f"><span>代購費率（售價 = 成本 ×（1＋費率））</span><div class="chips" id="rateChips" style="align-items:center">${[5,8,10,12,15].map(r=>`<button type="button" class="chip" data-r="${r}">+${r}%</button>`).join('')}<input class="inp" id="oRate" inputmode="decimal" aria-label="自訂費率 %" style="width:78px;flex:none" value="${rate}"><span class="sub">%</span></div></div>
     <h2>商品</h2><div id="lines"></div>
     <button class="btn sm" id="addLine" type="button">＋ 加商品</button>
     <div class="calc" style="margin-top:12px"><div class="row"><span class="grow sub">訂單總額</span><span class="big" id="oTot"></span></div>
@@ -466,10 +479,19 @@ function orderSheet(id){
       <input data-f="qty" type="number" min="1" inputmode="numeric" value="${l.qty}" aria-label="數量"><input data-f="price" inputmode="decimal" value="${l.price}" aria-label="單價"><button class="rm" data-f="rm" type="button" aria-label="移除">×</button></div>`}).join('')||'<p class="hint">還沒有商品，按下方加入。</p>';
     upd();
   };
-  const lineFor=(itm,vn)=>{const v=vn?findVar(itm,vn):null;return{price:varPrice(itm,v,t),costTwd:varCost(itm,v,t)}};
+  const lineFor=(itm,vn)=>{const v=vn?findVar(itm,vn):null;return{price:feePrice(itm,v,t,rate),costTwd:varCost(itm,v,t)}};
+  const markRate=()=>[...document.querySelectorAll('#rateChips [data-r]')].forEach(b=>b.classList.toggle('on',+b.dataset.r===rate));
+  const setRate=(r,typed)=>{
+    rate=r;if(!typed)$('#oRate').value=r;markRate();
+    o.lines.forEach(l=>{if(l.man)return;const itm=items.find(i=>i.id===l.itemId);if(itm)Object.assign(l,lineFor(itm,l.variant))});
+    drawLines();
+  };
   const addLine=itm=>{const vn=defVariant(itm);o.lines.push({itemId:itm.id,name:itm.name,variant:vn,qty:1,...lineFor(itm,vn)})};
   const toggleNew=()=>{$('#newCustBox').style.display=$('#oCust').value==='__new'?'block':'none'};
-  toggleNew();$('#oCust').onchange=toggleNew;
+  toggleNew();markRate();
+  $('#oCust').onchange=()=>{toggleNew();if(!ex)setRate(custRate($('#oCust').value))};
+  $('#rateChips').onclick=e=>{const b=e.target.closest('[data-r]');if(b)setRate(+b.dataset.r)};
+  $('#oRate').oninput=e=>{const s=e.target.value.trim();if(s===''||isNaN(Number(s)))return;setRate(cleanRate(s),true)};
   if(!o.lines.length)addLine(items.find(i=>!i.bought)||items[0]);
   drawLines();
   $('#addLine').onclick=()=>{addLine(items.find(i=>!o.lines.some(l=>l.itemId===i.id))||items[0]);drawLines()};
@@ -480,7 +502,7 @@ function orderSheet(id){
   };
   $('#lines').oninput=e=>{
     const row=e.target.closest('.line');if(!row)return;const l=o.lines[+row.dataset.n],f=e.target.dataset.f;
-    if(f==='qty')l.qty=Math.max(1,Math.round(num(e.target.value))||1);if(f==='price')l.price=num(e.target.value);upd();
+    if(f==='qty')l.qty=Math.max(1,Math.round(num(e.target.value))||1);if(f==='price'){l.price=num(e.target.value);l.man=true}upd();
   };
   $('#lines').onclick=e=>{if(e.target.dataset.f==='rm'){o.lines.splice(+e.target.closest('.line').dataset.n,1);drawLines()}};
   $('#oPaid').oninput=upd;
@@ -490,8 +512,8 @@ function orderSheet(id){
     if(!o.lines.length){toast('請至少加入一項商品');return false}
     let cid=$('#oCust').value;
     if(cid==='__new'){const nm=$('#oNewName').value.trim();if(!nm){toast('請輸入新顧客名稱');return false}
-      const c={id:uid(),name:nm,contact:'',note:'',createdAt:Date.now()};await save('customers',c);cid=c.id}
-    Object.assign(o,{customerId:cid,paid:num($('#oPaid').value),shipped:$('#oShip').checked,note:$('#oNote').value.trim()});
+      const c={id:uid(),name:nm,contact:'',note:'',rate,createdAt:Date.now()};await save('customers',c);cid=c.id}
+    Object.assign(o,{customerId:cid,rate,paid:num($('#oPaid').value),shipped:$('#oShip').checked,note:$('#oNote').value.trim()});
     await save('orders',o);return true;
   };
   $('#oSave').onclick=async()=>{if(await commit()){closeSheet();render();toast('已儲存訂單')}};
@@ -505,18 +527,19 @@ function orderSheet(id){
 /* ========== 顧客表單 ========== */
 function customerSheet(id){
   const ex=id?S.customers.find(x=>x.id===id):null;
-  const c=ex?{...ex}:{id:uid(),name:'',contact:'',note:'',createdAt:Date.now()};
+  const c=ex?{...ex}:{id:uid(),name:'',contact:'',note:'',rate:DEF_FEE,createdAt:Date.now()};
   const os=ex?S.orders.filter(o=>o.customerId===c.id).sort((a,b)=>b.createdAt-a.createdAt):[];
   const tot=os.reduce((s,o)=>s+orderTotal(o),0),due=os.reduce((s,o)=>s+orderTotal(o)-Math.min(o.paid||0,orderTotal(o)),0);
   openSheet(shHead(ex?'顧客資料':'新增顧客')+`
     <label class="f"><span>名稱</span><input id="cName" value="${esc(c.name)}" placeholder="姓名或 LINE 暱稱"></label>
     <label class="f"><span>聯絡方式</span><input id="cContact" value="${esc(c.contact)}" placeholder="LINE ID、IG、電話"></label>
+    <label class="f"><span>預設代購費率 %（下訂時自動帶入，可再調整）</span><input id="cRate" inputmode="decimal" value="${c.rate!=null?cleanRate(c.rate):DEF_FEE}"></label>
     <label class="f"><span>備註</span><textarea id="cNote" placeholder="收件地址、偏好、膚質⋯">${esc(c.note)}</textarea></label>
     ${ex?`<h2>購買紀錄（${os.length} 筆　共 ${twd(tot)}${due>0?`　待收 ${twd(due)}`:''}）</h2>`+(os.map(o=>{const tr=tripOf(o.tripId),[pk,pl]=payState(o);return `<div class="card" style="margin-bottom:8px"><div class="row"><b class="grow">${twd(orderTotal(o))}</b><span class="pill p-${pk}">${pl}</span><span class="pill ${o.shipped?'s-yes':'s-no'}">${o.shipped?'已出貨':'未出貨'}</span></div>
       <div class="sub" style="white-space:normal">${o.lines.map(l=>`${esc(lineLabel(l))}×${l.qty}`).join('、')}</div><div class="sub">${tr?esc(tr.name):''} · ${new Date(o.createdAt).toLocaleDateString('zh-TW')}</div></div>`}).join('')||'<p class="hint">還沒有訂單</p>'):''}
     <div class="actions">${ex?`<button class="btn danger" id="cDel" style="flex:0 0 auto">刪除</button>`:''}<button class="btn primary" id="cSave">儲存</button></div>`);
   $('#cSave').onclick=async()=>{const name=$('#cName').value.trim();if(!name){toast('請輸入名稱');return}
-    Object.assign(c,{name,contact:$('#cContact').value.trim(),note:$('#cNote').value.trim()});await save('customers',c);closeSheet();render()};
+    Object.assign(c,{name,contact:$('#cContact').value.trim(),note:$('#cNote').value.trim(),rate:cleanRate($('#cRate').value.trim()===''?DEF_FEE:$('#cRate').value)});await save('customers',c);closeSheet();render()};
   if($('#cDel'))$('#cDel').onclick=async function(){
     if(os.length){toast('這位顧客還有訂單，請先刪除訂單');return}
     if(!this.dataset.ok){this.dataset.ok=1;this.textContent='再按一次刪除';return}
@@ -593,12 +616,12 @@ const CLEAN={
       variants:(Array.isArray(r.variants)?r.variants:[]).slice(0,60).map(v=>({n:cs(v&&v.n,60),q:ci(v&&v.q,0,99999),c:cn(v&&v.c)>0?cn(v.c):'',p:cn(v&&v.p)>0?cn(v.p):''})).filter(v=>v.n),
       photos:(Array.isArray(r.photos)?r.photos:[]).slice(0,6).map(x=>({p:cleanImg(x&&x.p),t:cleanImg(x&&x.t)})).filter(x=>x.p),
       createdAt:cn(r.createdAt)||Date.now()}},
-  customers:r=>{if(!r||!okId(r.id))return null;return{id:r.id,name:cs(r.name,100),contact:cs(r.contact,200),note:cs(r.note,1000),createdAt:cn(r.createdAt)||Date.now()}},
+  customers:r=>{if(!r||!okId(r.id))return null;return{id:r.id,name:cs(r.name,100),contact:cs(r.contact,200),note:cs(r.note,1000),rate:r.rate==null?DEF_FEE:cleanRate(r.rate),createdAt:cn(r.createdAt)||Date.now()}},
   orders:r=>{if(!r||!okId(r.id)||!okId(r.tripId)||!okId(r.customerId))return null;
     return{id:r.id,tripId:r.tripId,customerId:r.customerId,
       lines:(Array.isArray(r.lines)?r.lines:[]).slice(0,300).map(l=>({itemId:okId(l&&l.itemId)?l.itemId:'',name:cs(l&&l.name,200),variant:cs(l&&l.variant,60),
         qty:ci(l&&l.qty,1,99999),price:cn(l&&l.price),costTwd:cn(l&&l.costTwd)})),
-      paid:cn(r.paid),shipped:!!r.shipped,note:cs(r.note,500),createdAt:cn(r.createdAt)||Date.now()}}
+      rate:r.rate==null?null:cleanRate(r.rate),paid:cn(r.paid),shipped:!!r.shipped,note:cs(r.note,500),createdAt:cn(r.createdAt)||Date.now()}}
 };
 async function importBackup(file){
   try{
