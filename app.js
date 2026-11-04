@@ -1,5 +1,5 @@
 'use strict';
-const VERSION='1.1.0';
+const VERSION='1.2.0';
 /* ========== 基本設定 ========== */
 const CUR={
   JPY:{sym:'¥',name:'日幣',dec:0,hint:1000,def:0.205},
@@ -61,18 +61,45 @@ const costTwd=(i,t)=>num(i.cost)*t.rate;
 const orderTotal=o=>o.lines.reduce((s,l)=>s+l.qty*l.price,0);
 const soldQty=(id,v)=>S.orders.reduce((s,o)=>s+o.lines.filter(l=>l.itemId===id&&(v===undefined||(l.variant||'')===v)).reduce((a,l)=>a+l.qty,0),0);
 const itemQty=i=>(i.variants&&i.variants.length)?i.variants.reduce((s,v)=>s+v.q,0):(i.qty||1);
+const photosOf=i=>(i.photos&&i.photos.length)?i.photos:(i.photo?[{p:i.photo,t:i.thumb||i.photo}]:[]);
+const findVar=(it,n)=>(it.variants||[]).find(v=>v.n===n)||null;
+const varCost=(it,v,t)=>(v&&num(v.c)>0)?num(v.c)*t.rate:costTwd(it,t);
+const varPrice=(it,v,t)=>{
+  if(v&&num(v.p)>0)return num(v.p);
+  if(v&&num(v.c)>0)return calcPrice(num(v.c)*t.rate,it.mode,num(it.val),t.round);
+  return it.price||0;
+};
+/* 從規格名稱讀出容量，例如「100ml」「1.5L」「30片」，用來算每單位多少錢 */
+const SIZE_RE=/(\d+(?:\.\d+)?)\s*(ml|cc|l|公升|kg|公斤|g|克|入|片|枚|個|个|包|支|顆|粒|條|pcs|sheets?)(?![a-z])/i;
+function parseSize(name){
+  const m=String(name||'').match(SIZE_RE);if(!m)return null;
+  let a=parseFloat(m[1]),u=m[2].toLowerCase(),cls;
+  if(!(a>0))return null;
+  if(u==='l'||u==='公升'){a*=1000;u='ml';cls='ml'}
+  else if(u==='ml'||u==='cc'){u='ml';cls='ml'}
+  else if(u==='kg'||u==='公斤'){a*=1000;u='g';cls='g'}
+  else if(u==='g'||u==='克'){u='g';cls='g'}
+  else{cls='pc';if(u==='pcs'||u.startsWith('sheet'))u='片';if(u==='个')u='個'}
+  return{amt:a,unit:u,cls};
+}
+function unitPrice(name,price){
+  const s=parseSize(name);if(!s||!(price>0))return null;
+  return{per:price/s.amt,unit:s.unit,cls:s.cls,amt:s.amt};
+}
+const fmtUnit=per=>per>=100?fmt(per,0):per>=10?fmt(per,1):fmt(per,2);
 const needBackup=()=>(S.items.length+S.orders.length>0)&&(!S.meta.backupAt||Date.now()-S.meta.backupAt>7*864e5);
 const custName=id=>(S.customers.find(c=>c.id===id)||{name:'(已刪除)'}).name;
 function payState(o){const tot=orderTotal(o);if(tot>0&&o.paid>=tot)return['paid','已付清'];if(o.paid>0)return['part','訂金 '+twd(o.paid)];return['none','未付款']}
 function tripStats(t){
   const items=S.items.filter(i=>i.tripId===t.id),orders=S.orders.filter(o=>o.tripId===t.id);
   const bought=items.filter(i=>i.bought);
-  const buyCost=bought.reduce((s,i)=>s+costTwd(i,t)*itemQty(i),0);
+  const hv=i=>(i.variants&&i.variants.length)?i.variants:null;
+  const buyCost=bought.reduce((s,i)=>s+(hv(i)?hv(i).reduce((a,v)=>a+v.q*varCost(i,v,t),0):costTwd(i,t)*itemQty(i)),0);
   const revenue=orders.reduce((s,o)=>s+orderTotal(o),0);
   const paid=orders.reduce((s,o)=>s+Math.min(o.paid||0,orderTotal(o)),0);
-  const lc=l=>l.costTwd||(()=>{const it=S.items.find(x=>x.id===l.itemId);return it?costTwd(it,t):0})();
+  const lc=l=>l.costTwd||(()=>{const it=S.items.find(x=>x.id===l.itemId);return it?varCost(it,l.variant?findVar(it,l.variant):null,t):0})();
   const soldCost=orders.reduce((s,o)=>s+o.lines.reduce((a,l)=>a+l.qty*lc(l),0),0);
-  const stock=bought.reduce((s,i)=>s+Math.max(0,itemQty(i)-soldQty(i.id))*costTwd(i,t),0);
+  const stock=bought.reduce((s,i)=>s+(hv(i)?hv(i).reduce((a,v)=>a+Math.max(0,v.q-soldQty(i.id,v.n))*varCost(i,v,t),0):Math.max(0,itemQty(i)-soldQty(i.id))*costTwd(i,t)),0);
   const unsold=bought.reduce((s,i)=>s+Math.max(0,itemQty(i)-soldQty(i.id)),0);
   return{items:items.length,bought:bought.length,buyCost,revenue,paid,due:revenue-paid,profit:revenue-soldCost,
     margin:revenue?(revenue-soldCost)/revenue*100:0,stock,unsold,toShip:orders.filter(o=>!o.shipped).length,orders:orders.length};
@@ -106,25 +133,50 @@ function render(){
 }
 const welcome=()=>`<div class="empty"><b style="color:var(--fg);font-size:17px">歡迎使用代購帳</b><br>每趟出國建立一個行程，<br>商品、訂單、利潤都會分開記。<br><br><button class="btn primary" data-act="newTrip">建立第一趟行程</button></div>`;
 
+const SORTS={new:'最新',price:'售價高到低',margin:'利潤率高到低',store:'店家',name:'名稱'};
+function priceLabel(i,t){
+  const ps=(i.variants||[]).map(v=>varPrice(i,v,t)).filter(p=>p>0);
+  if(ps.length)return twd(Math.min(...ps))+(new Set(ps).size>1?' 起':'');
+  return i.price?twd(i.price):'—';
+}
+function itemMargin(i,t){const p=i.price||0,c=costTwd(i,t);return p&&c?(p-c)/p:-1}
+function itemListHTML(t){
+  const f=ui.itemFilter,q=(ui.q||'').trim().toLowerCase();
+  const mine=S.items.filter(i=>i.tripId===t.id);
+  let list=mine.filter(i=>f==='all'||(f==='todo'?!i.bought:i.bought));
+  if(q)list=list.filter(i=>[i.name,i.store,i.note,...(i.variants||[]).map(v=>v.n)].join(' ').toLowerCase().includes(q));
+  const cmp={
+    new:(a,b)=>b.createdAt-a.createdAt,
+    price:(a,b)=>(b.price||0)-(a.price||0),
+    margin:(a,b)=>itemMargin(b,t)-itemMargin(a,t),
+    store:(a,b)=>(a.store||'\uffff').localeCompare(b.store||'\uffff','zh-Hant')||b.createdAt-a.createdAt,
+    name:(a,b)=>(a.name||'').localeCompare(b.name||'','zh-Hant')
+  }[ui.sort||'new'];
+  list.sort(cmp);
+  return list.length?list.map(i=>itemRow(i,t)).join(''):`<div class="empty">${mine.length?'沒有符合的商品':'還沒有商品。<br>出國前先把想買的記下來，<br>到現場再補成本和照片。'}</div>`;
+}
 function viewItems(t){
-  const all=S.items.filter(i=>i.tripId===t.id).sort((a,b)=>b.createdAt-a.createdAt);
-  const f=ui.itemFilter,list=all.filter(i=>f==='all'||(f==='todo'?!i.bought:i.bought));
+  const all=S.items.filter(i=>i.tripId===t.id),f=ui.itemFilter;
   const n=k=>all.filter(i=>k==='all'||(k==='todo'?!i.bought:i.bought)).length;
   const chip=(k,l)=>`<button class="chip ${f===k?'on':''}" data-act="itemFilter" data-id="${k}">${l} ${n(k)}</button>`;
-  return (needBackup()?`<div class="warn" data-act="tab" data-tab="rates" style="cursor:pointer">超過 7 天沒備份了，點這裡去備份</div>`:'')+`<div class="chips">${chip('all','全部')}${chip('todo','待買')}${chip('done','已買')}</div>`+
-    (list.length?list.map(i=>itemRow(i,t)).join(''):`<div class="empty">${all.length?'這個分類沒有商品':'還沒有商品。<br>出國前先把想買的記下來，<br>到現場再補成本和照片。'}</div>`)+
-    `<button class="fab" data-act="newItem">＋ 新增商品</button>`;
+  return (needBackup()?`<div class="warn" data-act="tab" data-tab="rates" style="cursor:pointer">超過 7 天沒備份了，點這裡去備份</div>`:'')+
+    `<div class="chips">${chip('all','全部')}${chip('todo','待買')}${chip('done','已買')}</div>`+
+    `<div class="row" style="gap:8px"><input class="inp" id="itemQ" type="search" enterkeyhint="search" placeholder="搜尋品名、店家、規格" value="${esc(ui.q||'')}" aria-label="搜尋商品" style="flex:1;min-width:0">`+
+    `<select class="inp" id="itemSort" aria-label="排序" style="width:auto;flex:none">${Object.entries(SORTS).map(([k,l])=>`<option value="${k}"${(ui.sort||'new')===k?' selected':''}>${l}</option>`).join('')}</select></div>`+
+    `<div id="itemList" class="list">${itemListHTML(t)}</div><button class="fab" data-act="newItem">＋ 新增商品</button>`;
 }
 function itemRow(i,t){
-  const sold=soldQty(i.id);
+  const sold=soldQty(i.id),vs=i.variants||[];
+  const costLine=num(i.cost)?fx(num(i.cost),t.currency)+' ≈ '+twd(costTwd(i,t)):(vs.some(v=>num(v.c)>0)?'規格各自成本':'成本未填');
   return `<div class="card item" data-act="editItem" data-id="${i.id}">
     <button class="chk ${i.bought?'on':''}" data-act="toggleBought" data-id="${i.id}" aria-label="已買">${i.bought?'✓':''}</button>
     <div class="thumb"${i.thumb?` style="background-image:url('${i.thumb}')"`:''}>${i.thumb?'':'無圖'}</div>
     <div class="grow"><div class="nm">${esc(i.name||'(未命名)')}</div>
-      <div class="sub">${esc(i.store||'')}${i.store?' · ':''}× ${itemQty(i)}${(i.variants||[]).length?`（${i.variants.length} 款）`:''}${sold?` · 已售 ${sold}`:''}</div>
-      <div class="sub">${num(i.cost)?fx(num(i.cost),t.currency)+' ≈ '+twd(costTwd(i,t)):'成本未填'}</div></div>
-    <div class="pr">${i.price?twd(i.price):'—'}</div></div>`;
+      <div class="sub">${esc(i.store||'')}${i.store?' · ':''}× ${itemQty(i)}${vs.length?`（${vs.length} 款）`:''}${sold?` · 已售 ${sold}`:''}</div>
+      <div class="sub">${costLine}</div></div>
+    <div class="pr">${priceLabel(i,t)}</div></div>`;
 }
+
 
 function viewOrders(t){
   const all=S.orders.filter(o=>o.tripId===t.id).sort((a,b)=>b.createdAt-a.createdAt);
@@ -238,25 +290,78 @@ function tripSheet(id){
 function itemSheet(id){
   const t=curTrip(),ex=id?S.items.find(x=>x.id===id):null;
   const lastStore=(S.items.filter(i=>i.tripId===t.id).sort((a,b)=>b.createdAt-a.createdAt)[0]||{}).store||'';
-  const it=ex?{...ex}:{id:uid(),tripId:t.id,name:'',store:lastStore,cost:'',qty:1,mode:t.mode,val:t.defaults[t.mode],price:0,manual:false,bought:false,note:'',photo:'',thumb:'',createdAt:Date.now()};
+  const it=ex?{...ex}:{id:uid(),tripId:t.id,name:'',store:lastStore,cost:'',qty:1,mode:t.mode,val:t.defaults[t.mode],price:0,manual:false,bought:false,note:'',photo:'',thumb:'',photos:[],variants:[],createdAt:Date.now()};
+  const photos=photosOf(it).map(x=>({p:x.p,t:x.t}));
+  const vars=(it.variants||[]).map(v=>({n:v.n,q:v.q,c:v.c||'',p:v.p||''}));
   const stores=[...new Set(S.items.map(i=>i.store).filter(Boolean))];
   const valLabel={mult:'倍數 ×',add:'加價 NT$',margin:'利潤率 %'};
   openSheet(shHead(ex?'編輯商品':'新增商品')+`
-    <label class="photo" for="ph" id="phBox"${it.photo?` style="background-image:url('${it.photo}')"`:''}>${it.photo?'':'拍照 / 選照片'}</label>
-    <input type="file" id="ph" accept="image/*" hidden>
+    <label class="photo" for="ph" id="phBox"></label>
+    <input type="file" id="ph" accept="image/*" multiple hidden>
+    <div class="ph-strip" id="phStrip"></div>
     <label class="f"><span>品名</span><input id="iName" value="${esc(it.name)}" placeholder="例：Dr.G 防曬乳 50ml" autocomplete="off"></label>
     <div class="two"><label class="f"><span>購買店家</span><input id="iStore" list="storeList" value="${esc(it.store)}" placeholder="例：Olive Young" autocomplete="off"><datalist id="storeList">${stores.map(s=>`<option value="${esc(s)}">`).join('')}</datalist></label>
     <label class="f"><span>數量</span><input id="iQty" type="number" min="1" inputmode="numeric" value="${it.qty||1}"></label></div>
-    <div class="f"><span>規格（選填，例如色號、尺寸，各自記數量）</span><div id="vars"></div><button class="btn sm" id="addVar" type="button">＋ 加規格</button></div>
     <label class="f"><span>商品細節（會顯示在圖片上）</span><textarea id="iNote" placeholder="規格、色號、容量、備註">${esc(it.note)}</textarea></label>
-    <label class="f"><span>成本（${t.currency}，每件）</span><input id="iCost" inputmode="decimal" value="${it.cost===''?'':it.cost}" placeholder="0"></label>
+    <label class="f"><span>成本（${t.currency}，每件，規格沒填成本時沿用）</span><input id="iCost" inputmode="decimal" value="${it.cost===''?'':it.cost}" placeholder="0"></label>
     <div class="calc"><div class="sub" id="cTwd"></div>
       <div class="seg" id="iMode" style="margin-top:8px">${Object.keys(MODE_LABEL).map(k=>`<button type="button" data-m="${k}" class="${it.mode===k?'on':''}">${MODE_LABEL[k]}</button>`).join('')}</div>
       <div class="two"><label class="f" style="margin:0"><span id="vLbl">${valLabel[it.mode]}</span><input id="iVal" inputmode="decimal" value="${it.val}"></label>
       <label class="f" style="margin:0"><span>售價 NT$ <a href="#" id="auto" style="display:none;color:var(--accent)">改回自動</a></span><input id="iPrice" inputmode="decimal" value="${it.price||''}"></label></div>
       <div class="sub" id="cProfit" style="margin-top:8px"></div></div>
+    <div class="f"><span>規格（選填）：容量、尺寸、色號</span><p class="hint" style="margin:0 0 8px">每個規格可以填自己的成本和售價，留空就沿用上面的設定。名稱寫上容量（例如 100ml、30片），會自動算每單位多少錢。</p><div id="vars"></div><button class="btn sm" id="addVar" type="button">＋ 加規格</button></div>
     <label class="chkrow"><input type="checkbox" id="iBought"${it.bought?' checked':''}><span>已買到</span></label>
     <div class="actions">${ex?`<button class="btn danger" id="iDel" style="flex:0 0 auto">刪除</button>`:''}<button class="btn" id="iSave">儲存</button><button class="btn primary" id="iExp">儲存並匯出圖片</button></div>`);
+
+  /* 照片：可多張，第一張是主圖 */
+  const drawPhotos=()=>{
+    const b=$('#phBox');
+    if(photos[0]){b.style.backgroundImage=`url('${photos[0].p}')`;b.textContent=''}
+    else{b.style.backgroundImage='';b.textContent='拍照 / 選照片（可多張）'}
+    $('#phStrip').innerHTML=photos.length?photos.map((x,n)=>`<div class="ph-th${n===0?' main':''}" data-n="${n}" style="background-image:url('${x.t}')"><button class="ph-x" data-f="del" type="button" aria-label="刪除照片">×</button></div>`).join('')+(photos.length>1?'<span class="sub" style="align-self:center;white-space:nowrap">點縮圖設為主圖</span>':''):'';
+  };
+  drawPhotos();
+  $('#ph').onchange=async e=>{
+    const fs=[...e.target.files];e.target.value='';
+    for(const f of fs){
+      if(photos.length>=6){toast('最多 6 張照片');break}
+      try{const r=await processPhoto(f);photos.push({p:r.photo,t:r.thumb})}catch(err){toast('有照片無法讀取')}
+    }
+    drawPhotos();
+  };
+  $('#phStrip').onclick=e=>{
+    const th=e.target.closest('.ph-th');if(!th)return;const n=+th.dataset.n;
+    if(e.target.dataset.f==='del')photos.splice(n,1);else if(n>0)photos.unshift(photos.splice(n,1)[0]);
+    drawPhotos();
+  };
+
+  /* 規格：名稱、數量、成本、售價（成本與售價可留空） */
+  const baseCost=()=>num($('#iCost').value)*t.rate;
+  const vPrice=v=>{
+    if(num(v.p)>0)return num(v.p);
+    const c=num(v.c)>0?num(v.c)*t.rate:baseCost();
+    return num(v.c)>0&&c>0?calcPrice(c,it.mode,num($('#iVal').value),t.round):(num($('#iPrice').value)||0);
+  };
+  const syncQty=()=>{const q=$('#iQty');if(vars.length){q.value=vars.reduce((s,v)=>s+Math.max(0,Math.round(num(v.q))),0);q.disabled=true}else q.disabled=false};
+  const updVars=()=>{
+    const rows=[...$('#vars').children];
+    const infos=vars.map(v=>{const price=vPrice(v),cost=num(v.c)>0?num(v.c)*t.rate:baseCost();return{price,cost,u:unitPrice(v.n,price)}});
+    const best={},cnt={};
+    infos.forEach((x,i)=>{if(!x.u)return;cnt[x.u.cls]=(cnt[x.u.cls]||0)+1;const b=best[x.u.cls];if(b===undefined||x.u.per<infos[b].u.per)best[x.u.cls]=i});
+    rows.forEach((r,i)=>{
+      const x=infos[i];
+      r.querySelector('[data-f=p]').placeholder=x.price?`售價 ${fmt(x.price)}`:'售價';
+      const mg=x.price&&x.cost?` · 利潤 ${fmt((x.price-x.cost)/x.price*100,0)}%`:'';
+      const un=x.u?` · NT$ ${fmtUnit(x.u.per)}/${x.u.unit}${cnt[x.u.cls]>1&&best[x.u.cls]===i?'　★ 最划算':''}`:'';
+      r.querySelector('.vinfo').textContent=(x.price?`NT$ ${fmt(x.price)}`:'')+mg+un;
+    });
+  };
+  const drawVars=()=>{
+    $('#vars').innerHTML=vars.map((v,n)=>`<div class="vrow" data-n="${n}"><input data-f="n" placeholder="規格，例：100ml 或 01 Rose" value="${esc(v.n)}" aria-label="規格名稱"><button class="rm" data-f="rm" type="button" aria-label="移除規格">×</button>
+      <input data-f="q" type="number" min="0" inputmode="numeric" placeholder="數量" value="${v.q}" aria-label="數量"><input data-f="c" inputmode="decimal" placeholder="成本 ${t.currency}" value="${v.c}" aria-label="成本"><input data-f="p" inputmode="decimal" placeholder="售價" value="${v.p}" aria-label="售價"><div class="vinfo"></div></div>`).join('');
+    syncQty();updVars();
+  };
+
   const recalc=()=>{
     const c=num($('#iCost').value)*t.rate;
     $('#cTwd').textContent=c?`成本 ≈ ${twd(c)}（匯率 ${fmt(t.rate,4)}）`:'輸入成本後自動計算售價';
@@ -264,29 +369,28 @@ function itemSheet(id){
     const p=num($('#iPrice').value);
     $('#cProfit').textContent=p&&c?`每件利潤 ${twd(p-c)}（${fmt((p-c)/p*100,1)}%）`:'';
     $('#auto').style.display=it.manual?'inline':'none';
+    updVars();
   };
-  const vars=(it.variants||[]).map(v=>({n:v.n,q:v.q}));
-  const syncQty=()=>{const q=$('#iQty');if(vars.length){q.value=vars.reduce((s,v)=>s+Math.max(0,Math.round(num(v.q))),0);q.disabled=true}else q.disabled=false};
-  const drawVars=()=>{$('#vars').innerHTML=vars.map((v,n)=>`<div class="vrow" data-n="${n}"><input data-f="n" placeholder="例：01 Rose / M" value="${esc(v.n)}" aria-label="規格名稱"><input data-f="q" type="number" min="0" inputmode="numeric" value="${v.q}" aria-label="數量"><button class="rm" data-f="rm" type="button" aria-label="移除">×</button></div>`).join('');syncQty()};
-  drawVars();
-  $('#addVar').onclick=()=>{vars.push({n:'',q:1});drawVars();const r=$('#vars').lastElementChild;if(r)r.querySelector('input').focus()};
-  $('#vars').oninput=e=>{const r=e.target.closest('.vrow');if(!r)return;const v=vars[+r.dataset.n];if(e.target.dataset.f==='n')v.n=e.target.value;else{v.q=e.target.value;syncQty()}};
+  drawVars();recalc();
+  $('#addVar').onclick=()=>{vars.push({n:'',q:1,c:'',p:''});drawVars();const r=$('#vars').lastElementChild;if(r)r.querySelector('input').focus()};
+  $('#vars').oninput=e=>{
+    const r=e.target.closest('.vrow'),f=e.target.dataset.f;if(!r||!f||f==='rm')return;
+    vars[+r.dataset.n][f]=e.target.value;if(f==='q')syncQty();updVars();
+  };
   $('#vars').onclick=e=>{if(e.target.dataset.f==='rm'){vars.splice(+e.target.closest('.vrow').dataset.n,1);drawVars()}};
-  recalc();
   $('#iCost').oninput=$('#iVal').oninput=recalc;
   $('#iPrice').oninput=()=>{it.manual=true;recalc()};
   $('#auto').onclick=e=>{e.preventDefault();it.manual=false;recalc()};
   $('#iMode').onclick=e=>{const b=e.target.closest('[data-m]');if(!b)return;it.mode=b.dataset.m;it.manual=false;
     [...$('#iMode').children].forEach(x=>x.classList.toggle('on',x===b));$('#iVal').value=t.defaults[it.mode];$('#vLbl').textContent=valLabel[it.mode];recalc()};
-  $('#ph').onchange=async e=>{const f=e.target.files[0];if(!f)return;
-    try{const r=await processPhoto(f);it.photo=r.photo;it.thumb=r.thumb;const b=$('#phBox');b.style.backgroundImage=`url('${r.photo}')`;b.textContent=''}
-    catch(err){toast('這張照片無法讀取')}};
+
   const commit=async()=>{
     const name=$('#iName').value.trim();if(!name){toast('請輸入品名');return false}
-    const vlist=vars.map(v=>({n:v.n.trim().slice(0,60),q:Math.max(0,Math.round(num(v.q)))})).filter(v=>v.n);
+    const vlist=vars.map(v=>({n:v.n.trim().slice(0,60),q:Math.max(0,Math.round(num(v.q))),c:num(v.c)>0?num(v.c):'',p:num(v.p)>0?num(v.p):''})).filter(v=>v.n);
     const vsum=vlist.reduce((s,v)=>s+v.q,0);
-    Object.assign(it,{name,store:$('#iStore').value.trim(),qty:vlist.length?Math.max(1,vsum):Math.max(1,Math.round(num($('#iQty').value))||1),variants:vlist,note:$('#iNote').value.trim(),
-      cost:num($('#iCost').value)||'',val:num($('#iVal').value),price:num($('#iPrice').value),bought:$('#iBought').checked});
+    Object.assign(it,{name,store:$('#iStore').value.trim(),qty:vlist.length?Math.max(1,vsum):Math.max(1,Math.round(num($('#iQty').value))||1),variants:vlist,
+      note:$('#iNote').value.trim(),cost:num($('#iCost').value)||'',val:num($('#iVal').value),price:num($('#iPrice').value),bought:$('#iBought').checked,
+      photos:photos.map(x=>({p:x.p,t:x.t})),photo:photos[0]?photos[0].p:'',thumb:photos[0]?photos[0].t:''});
     await save('items',it);return true;
   };
   $('#iSave').onclick=async()=>{if(await commit()){closeSheet();render();toast('已儲存')}};
@@ -296,6 +400,7 @@ function itemSheet(id){
     await remove('items',it.id);closeSheet();render();
   };
 }
+
 function loadImg(src){return new Promise((res,rej)=>{const i=new Image();i.onload=()=>res(i);i.onerror=rej;i.src=src})}
 async function processPhoto(file){
   const url=URL.createObjectURL(file);
@@ -318,7 +423,7 @@ function orderSheet(id){
     const own=ex?ex.lines.filter(l=>l.itemId===itm.id&&(l.variant||'')===vn).reduce((s,l)=>s+l.qty,0):0;return v.q-soldQty(itm.id,vn)+own};
   const defVariant=itm=>{const vs=itm.variants||[];const f=vs.find(v=>leftOf(itm,v.n)>0)||vs[0];return f?f.n:''};
   const itemOpts=sel=>items.map(i=>`<option value="${i.id}"${i.id===sel?' selected':''}>${esc(i.name)}</option>`).join('');
-  const varOpts=(itm,sel)=>(itm.variants||[]).map(v=>`<option value="${esc(v.n)}"${v.n===sel?' selected':''}>${esc(v.n)}（剩 ${leftOf(itm,v.n)}）</option>`).join('');
+  const varOpts=(itm,sel)=>(itm.variants||[]).map(v=>`<option value="${esc(v.n)}"${v.n===sel?' selected':''}>${esc(v.n)} · NT$ ${fmt(varPrice(itm,v,t))}（剩 ${leftOf(itm,v.n)}）</option>`).join('');
   openSheet(shHead(ex?'編輯訂單':'新增訂單')+`
     <label class="f"><span>顧客</span><select id="oCust">${S.customers.map(c=>`<option value="${c.id}"${c.id===o.customerId?' selected':''}>${esc(c.name)}</option>`).join('')}<option value="__new"${o.customerId==='__new'?' selected':''}>＋ 新顧客</option></select></label>
     <label class="f" id="newCustBox" style="display:none"><span>新顧客名稱</span><input id="oNewName" placeholder="姓名或 LINE 暱稱"></label>
@@ -361,7 +466,8 @@ function orderSheet(id){
       <input data-f="qty" type="number" min="1" inputmode="numeric" value="${l.qty}" aria-label="數量"><input data-f="price" inputmode="decimal" value="${l.price}" aria-label="單價"><button class="rm" data-f="rm" type="button" aria-label="移除">×</button></div>`}).join('')||'<p class="hint">還沒有商品，按下方加入。</p>';
     upd();
   };
-  const addLine=itm=>{o.lines.push({itemId:itm.id,name:itm.name,variant:defVariant(itm),qty:1,price:itm.price||0,costTwd:costTwd(itm,t)})};
+  const lineFor=(itm,vn)=>{const v=vn?findVar(itm,vn):null;return{price:varPrice(itm,v,t),costTwd:varCost(itm,v,t)}};
+  const addLine=itm=>{const vn=defVariant(itm);o.lines.push({itemId:itm.id,name:itm.name,variant:vn,qty:1,...lineFor(itm,vn)})};
   const toggleNew=()=>{$('#newCustBox').style.display=$('#oCust').value==='__new'?'block':'none'};
   toggleNew();$('#oCust').onchange=toggleNew;
   if(!o.lines.length)addLine(items.find(i=>!i.bought)||items[0]);
@@ -369,8 +475,8 @@ function orderSheet(id){
   $('#addLine').onclick=()=>{addLine(items.find(i=>!o.lines.some(l=>l.itemId===i.id))||items[0]);drawLines()};
   $('#lines').onchange=e=>{
     const row=e.target.closest('.line');if(!row)return;const l=o.lines[+row.dataset.n],f=e.target.dataset.f;
-    if(f==='item'){const itm=items.find(i=>i.id===e.target.value);if(!itm)return;Object.assign(l,{itemId:itm.id,name:itm.name,variant:defVariant(itm),price:itm.price||0,costTwd:costTwd(itm,t)});drawLines()}
-    else if(f==='variant')l.variant=e.target.value;
+    if(f==='item'){const itm=items.find(i=>i.id===e.target.value);if(!itm)return;const dv=defVariant(itm);Object.assign(l,{itemId:itm.id,name:itm.name,variant:dv,...lineFor(itm,dv)});drawLines()}
+    else if(f==='variant'){const itm=items.find(i=>i.id===l.itemId);l.variant=e.target.value;if(itm)Object.assign(l,lineFor(itm,l.variant));drawLines()}
   };
   $('#lines').oninput=e=>{
     const row=e.target.closest('.line');if(!row)return;const l=o.lines[+row.dataset.n],f=e.target.dataset.f;
@@ -422,17 +528,35 @@ function customerSheet(id){
 function converterSheet(){
   const t=curTrip();let cur=t?t.currency:'JPY';
   const rateOf=c=>t&&t.currency===c?t.rate:S.meta.rates[c];
-  openSheet(shHead('匯率換算')+`
+  openSheet(shHead('換算')+`
+    <div class="seg" id="cvTab"><button type="button" data-k="fx" class="on">匯率換算</button><button type="button" data-k="unit">單價比較</button></div>
     <label class="f"><span>幣別</span><select id="vCur">${Object.keys(CUR).map(k=>`<option value="${k}"${k===cur?' selected':''}>${k} ${CUR[k].name}</option>`).join('')}</select></label>
-    <div class="two"><label class="f"><span id="vA">外幣</span><input id="vF" inputmode="decimal" placeholder="0"></label><label class="f"><span>台幣 NT$</span><input id="vT" inputmode="decimal" placeholder="0"></label></div>
-    <p class="hint" id="vNote"></p>
+    <div id="cvFx"><div class="two"><label class="f"><span id="vA">外幣</span><input id="vF" inputmode="decimal" placeholder="0"></label><label class="f"><span>台幣 NT$</span><input id="vT" inputmode="decimal" placeholder="0"></label></div>
+    <p class="hint" id="vNote"></p></div>
+    <div id="cvUnit" style="display:none">
+      <label class="f"><span>比較單位</span><select id="uUnit"><option value="ml">毫升 ml</option><option value="g">公克 g</option><option value="pc">片 / 入 / 個</option></select></label>
+      ${[1,2,3,4].map(()=>`<div class="urow"><input class="inp" data-f="p" inputmode="decimal" placeholder="價格"><input class="inp" data-f="a" inputmode="decimal" placeholder="容量或數量"><div class="uout"></div></div>`).join('')}
+      <p class="hint">輸入各種容量的價格和數量，自動算每單位多少錢，最划算的會標出來。</p></div>
     <div class="actions"><button class="btn primary" data-act="close">完成</button></div>`);
-  const note=()=>{cur=$('#vCur').value;$('#vA').textContent=cur+' '+CUR[cur].name;$('#vNote').textContent=`使用匯率：1 ${cur} = NT$ ${fmt(rateOf(cur),4)}${t&&t.currency===cur?'（目前行程）':'（市場）'}`};note();
-  $('#vCur').onchange=()=>{note();$('#vF').dispatchEvent(new Event('input'))};
+  const cur$=()=>$('#vCur').value;
+  const note=()=>{cur=cur$();$('#vA').textContent=cur+' '+CUR[cur].name;$('#vNote').textContent=`使用匯率：1 ${cur} = NT$ ${fmt(rateOf(cur),4)}${t&&t.currency===cur?'（目前行程）':'（市場）'}`};note();
+  const calcUnit=()=>{
+    const rows=[...document.querySelectorAll('#cvUnit .urow')],unit={ml:'ml',g:'g',pc:'個'}[$('#uUnit').value],rate=rateOf(cur$());
+    const vals=rows.map(r=>{const p=num(r.querySelector('[data-f=p]').value),a=num(r.querySelector('[data-f=a]').value);return p>0&&a>0?p/a:null});
+    const ok=vals.filter(v=>v!==null),best=ok.length>1?Math.min(...ok):null;
+    rows.forEach((r,i)=>{const v=vals[i],o=r.querySelector('.uout');
+      o.innerHTML=v===null?'':`${CUR[cur$()].sym}${fmt(v,v<1?3:2)}/${unit} ≈ NT$ ${fmtUnit(v*rate)}/${unit}　每 100${unit} NT$ ${fmt(v*rate*100,0)}${best!==null&&v===best?' <b style="color:var(--good)">★ 最划算</b>':''}`});
+  };
+  $('#cvTab').onclick=e=>{const b=e.target.closest('[data-k]');if(!b)return;[...$('#cvTab').children].forEach(x=>x.classList.toggle('on',x===b));
+    $('#cvFx').style.display=b.dataset.k==='fx'?'block':'none';$('#cvUnit').style.display=b.dataset.k==='unit'?'block':'none';
+    if(b.dataset.k==='unit')calcUnit()};
+  $('#vCur').onchange=()=>{note();$('#vF').dispatchEvent(new Event('input'));calcUnit()};
   $('#vF').oninput=()=>{const v=num($('#vF').value);$('#vT').value=v?fmt(v*rateOf(cur),1).replace(/,/g,''):''};
   $('#vT').oninput=()=>{const v=num($('#vT').value);$('#vF').value=v?fmt(v/rateOf(cur),CUR[cur].dec).replace(/,/g,''):''};
+  $('#cvUnit').oninput=calcUnit;$('#uUnit').onchange=calcUnit;
   $('#vF').focus();
 }
+
 async function updateRates(){
   try{
     const ac=new AbortController(),to=setTimeout(()=>ac.abort(),8000);
@@ -466,7 +590,8 @@ const CLEAN={
     return{id:r.id,tripId:r.tripId,name:cs(r.name,200),store:cs(r.store,100),note:cs(r.note,2000),cost:(r.cost===''||r.cost==null)?'':cn(r.cost),
       qty:ci(r.qty,1,99999),mode:MODE_LABEL[r.mode]?r.mode:'mult',val:cn(r.val),price:cn(r.price),manual:!!r.manual,bought:!!r.bought,
       photo:cleanImg(r.photo),thumb:cleanImg(r.thumb),
-      variants:(Array.isArray(r.variants)?r.variants:[]).slice(0,60).map(v=>({n:cs(v&&v.n,60),q:ci(v&&v.q,0,99999)})).filter(v=>v.n),
+      variants:(Array.isArray(r.variants)?r.variants:[]).slice(0,60).map(v=>({n:cs(v&&v.n,60),q:ci(v&&v.q,0,99999),c:cn(v&&v.c)>0?cn(v.c):'',p:cn(v&&v.p)>0?cn(v.p):''})).filter(v=>v.n),
+      photos:(Array.isArray(r.photos)?r.photos:[]).slice(0,6).map(x=>({p:cleanImg(x&&x.p),t:cleanImg(x&&x.t)})).filter(x=>x.p),
       createdAt:cn(r.createdAt)||Date.now()}},
   customers:r=>{if(!r||!okId(r.id))return null;return{id:r.id,name:cs(r.name,100),contact:cs(r.contact,200),note:cs(r.note,1000),createdAt:cn(r.createdAt)||Date.now()}},
   orders:r=>{if(!r||!okId(r.id)||!okId(r.tripId)||!okId(r.customerId))return null;
@@ -508,8 +633,12 @@ const ACT={
   exportBackup,importBackup:()=>$('#importFile').click()
 };
 document.addEventListener('click',e=>{const el=e.target.closest('[data-act]');if(!el)return;const fn=ACT[el.dataset.act];if(fn){e.stopPropagation();fn(el.dataset.id,el,e)}});
+document.addEventListener('input',e=>{
+  if(e.target.id==='itemQ'){ui.q=e.target.value;const l=$('#itemList'),t=curTrip();if(l&&t)l.innerHTML=itemListHTML(t)}
+});
 document.addEventListener('change',async e=>{
   if(e.target.id==='tripSel'){await setMeta('tripId',e.target.value);render()}
+  else if(e.target.id==='itemSort'){ui.sort=e.target.value;render()}
   else if(e.target.dataset.rate){const v=num(e.target.value);if(v>0){const r={...S.meta.rates,[e.target.dataset.rate]:v};await setMeta('rates',r)}render()}
   else if(e.target.id==='payInfo'){await setMeta('payInfo',e.target.value.trim().slice(0,500))}
   else if(e.target.id==='importFile'){const f=e.target.files[0];e.target.value='';if(f)importBackup(f)}

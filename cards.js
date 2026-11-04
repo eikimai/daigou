@@ -41,22 +41,36 @@ function drawPrice(g,x,top,n,o,dry){
   const w1=g.measureText('NT$').width+o.gap;
   g.font=`${o.wb} ${o.big}px ${CARD_FONT}`;const s=fmt(Math.round(n||0));
   if(!dry)g.fillText(s,x+w1,base);
-  const w=w1+g.measureText(s).width;g.restore();return w;
+  let w=w1+g.measureText(s).width;
+  if(o.suffix){g.font=`${o.ws} ${o.small}px ${CARD_FONT}`;if(!dry)g.fillText(o.suffix,x+w+10,base);w+=10+g.measureText(o.suffix).width}
+  g.restore();return w;
+}
+function coverDraw(g,im,x,y,w,h){
+  const k=Math.max(w/im.width,h/im.height),dw=im.width*k,dh=im.height*k;
+  g.save();g.beginPath();g.rect(x,y,w,h);g.clip();g.drawImage(im,x+(w-dw)/2,y+(h-dh)/2,dw,dh);g.restore();
 }
 async function drawPhoto(g,it,o,x,y,w,h,r){
   g.save();
   if(r)rr(g,x,y,w,h,r);else{g.beginPath();g.rect(x,y,w,h)}
   g.clip();
-  if(it.photo){
-    const im=await loadImg(it.photo);
-    if(o.fit==='contain'){
-      g.fillStyle='#f2f2f2';g.fillRect(x,y,w,h);
-      const k=Math.min(w/im.width,h/im.height);g.drawImage(im,x+(w-im.width*k)/2,y+(h-im.height*k)/2,im.width*k,im.height*k);
-    }else{
-      const k=Math.max(w/im.width,h/im.height),dw=im.width*k,dh=im.height*k;g.drawImage(im,x+(w-dw)/2,y+(h-dh)/2,dw,dh);
-    }
+  const list=photosOf(it);
+  if(o.collage&&list.length>1){
+    const ims=await Promise.all(list.slice(0,4).map(p=>loadImg(p.p))),gap=6,n=ims.length;
+    g.fillStyle='#fff';g.fillRect(x,y,w,h);
+    if(n===2){const cw=(w-gap)/2;coverDraw(g,ims[0],x,y,cw,h);coverDraw(g,ims[1],x+cw+gap,y,cw,h)}
+    else if(n===3){const lw=Math.round(w*.6),rw=w-lw-gap,rh=(h-gap)/2;coverDraw(g,ims[0],x,y,lw,h);coverDraw(g,ims[1],x+lw+gap,y,rw,rh);coverDraw(g,ims[2],x+lw+gap,y+rh+gap,rw,rh)}
+    else{const cw=(w-gap)/2,ch=(h-gap)/2;ims.forEach((im,i)=>coverDraw(g,im,x+(i%2)*(cw+gap),y+Math.floor(i/2)*(ch+gap),cw,ch))}
   }else{
-    const gr=g.createLinearGradient(x,y,x+w,y+h);gr.addColorStop(0,'#e9eef2');gr.addColorStop(1,'#d3dde5');g.fillStyle=gr;g.fillRect(x,y,w,h);
+    const cur=list[o.pi||0]||list[0];
+    if(cur){
+      const im=await loadImg(cur.p);
+      if(o.fit==='contain'){
+        g.fillStyle='#f2f2f2';g.fillRect(x,y,w,h);
+        const k=Math.min(w/im.width,h/im.height);g.drawImage(im,x+(w-im.width*k)/2,y+(h-im.height*k)/2,im.width*k,im.height*k);
+      }else coverDraw(g,im,x,y,w,h);
+    }else{
+      const gr=g.createLinearGradient(x,y,x+w,y+h);gr.addColorStop(0,'#e9eef2');gr.addColorStop(1,'#d3dde5');g.fillStyle=gr;g.fillRect(x,y,w,h);
+    }
   }
   g.restore();
 }
@@ -64,6 +78,18 @@ async function drawPhoto(g,it,o,x,y,w,h,r){
 function cardVariants(it){
   return (it.variants||[]).filter(v=>!it.bought||v.q-soldQty(it.id,v.n)>0).map(v=>v.n);
 }
+/* 售價：規格價格不同時顯示最低價加「起」，並列出價格表 */
+function cardPricing(it,o){
+  const t=tripOf(it.tripId);
+  const vs=(it.variants||[]).filter(v=>!it.bought||v.q-soldQty(it.id,v.n)>0);
+  if(!t||!vs.length)return{price:it.price||0,from:false,rows:null};
+  const rows=vs.map(v=>{const p=varPrice(it,v,t),u=o.unit?unitPrice(v.n,p):null;return{n:v.n,p,u:u?`NT$ ${fmtUnit(u.per)}/${u.unit}`:''}});
+  const ps=rows.map(r=>r.p).filter(p=>p>0);
+  if(!ps.length)return{price:it.price||0,from:false,rows:null};
+  const distinct=new Set(ps).size>1;
+  return{price:Math.min(...ps),from:distinct,rows:distinct?rows:null};
+}
+const hasUnit=it=>(it.variants||[]).some(v=>parseSize(v.n));
 function layoutChips(g,list,maxW,font,padX,gap,maxRows){
   g.font=font;const rows=[[]];let x=0;
   for(const t of list){
@@ -73,17 +99,34 @@ function layoutChips(g,list,maxW,font,padX,gap,maxRows){
   }
   return rows;
 }
+/* 價格表：左邊規格名稱，右邊售價，中間灰色小字是每單位價格 */
+function drawTable(g,rows,x,y,w,st){
+  rows.slice(0,6).forEach(r=>{
+    g.textBaseline='top';
+    g.font=st.pf;const ptxt='NT$ '+fmt(r.p),pw=g.measureText(ptxt).width;
+    g.textAlign='right';g.fillStyle=st.pc;g.fillText(ptxt,x+w,y);
+    let right=x+w-pw-24;
+    if(r.u){g.font=st.uf;g.fillStyle=st.uc;g.fillText(r.u,right,y+st.uo);right-=g.measureText(r.u).width+24}
+    g.textAlign='left';g.font=st.nf;g.fillStyle=st.nc;
+    let nm=r.n;while(nm.length>1&&g.measureText(nm).width>right-x)nm=nm.slice(0,-1);
+    g.fillText(nm===r.n?nm:nm.slice(0,-1)+'…',x,y);
+    y+=st.h;
+    if(st.line){g.fillStyle=st.line;g.fillRect(x,y-9,w,2)}
+  });
+  g.textAlign='left';return y;
+}
 
 /* ---------- 樣式一：簡約 ---------- */
 async function cardClean(it,o){
   const W=1080,H=1350,PAD=60,F=CARD_FONT,c=newCanvas(W,H),g=c.getContext('2d');
+  const pr=cardPricing(it,o),tbl=o.variants&&pr.rows?pr.rows.slice(0,6):null;
   g.font=`700 60px ${F}`;const nameL=capLines(wrapText(g,it.name||'',W-PAD*2),2);
-  const vars=o.variants?cardVariants(it):[];
+  const vars=o.variants&&!tbl?cardVariants(it):[];
   g.font=`700 36px ${F}`;const varL=vars.length?capLines(wrapText(g,'規格　'+vars.join('／'),W-PAD*2),2):[];
-  g.font=`400 36px ${F}`;const noteL=o.note&&it.note?capLines(wrapText(g,it.note,W-PAD*2),6):[];
-  const badge=o.store&&it.store,nTxt=varL.length+noteL.length;
-  const block=44+(badge?84:0)+nameL.length*76+138+(nTxt?18+nTxt*52:0)+40;
-  const PH=Math.max(520,Math.min(820,H-block));
+  g.font=`400 36px ${F}`;const noteL=o.note&&it.note?capLines(wrapText(g,it.note,W-PAD*2),tbl?3:6):[];
+  const badge=o.store&&it.store,tblH=tbl?tbl.length*58:0,nTxt=varL.length+noteL.length;
+  const block=44+(badge?84:0)+nameL.length*76+138+((tbl||nTxt)?18:0)+tblH+nTxt*52+40;
+  const PH=Math.max(460,Math.min(820,H-block));
   g.fillStyle='#fff';g.fillRect(0,0,W,H);
   await drawPhoto(g,it,o,0,0,W,PH,0);
   g.textBaseline='top';g.textAlign='left';
@@ -95,8 +138,10 @@ async function cardClean(it,o){
   }
   g.fillStyle='#1a1d20';g.font=`700 60px ${F}`;
   nameL.forEach(l=>{g.fillText(l,PAD,y);y+=76});
-  drawPrice(g,PAD,y+2,it.price,{small:50,big:116,ws:700,wb:800,color:RED,gap:12});y+=138;
-  if(nTxt)y+=18;
+  drawPrice(g,PAD,y+2,pr.price,{small:50,big:116,ws:700,wb:800,color:RED,gap:12,suffix:pr.from?'起':''});y+=138;
+  if(tbl||nTxt)y+=18;
+  if(tbl)y=drawTable(g,tbl,PAD,y,W-PAD*2,{nf:`600 36px ${F}`,nc:'#1a1d20',pf:`700 36px ${F}`,pc:RED,uf:`400 28px ${F}`,uc:'#7a838a',uo:4,h:58,line:'#eceff1'});
+  g.textBaseline='top';
   g.font=`700 36px ${F}`;g.fillStyle='#33404a';varL.forEach(l=>{g.fillText(l,PAD,y);y+=52});
   g.font=`400 36px ${F}`;g.fillStyle='#5b6670';noteL.forEach(l=>{g.fillText(l,PAD,y);y+=52});
   return c;
@@ -105,13 +150,14 @@ async function cardClean(it,o){
 /* ---------- 樣式二：雜誌 ---------- */
 async function cardMag(it,o){
   const W=1080,H=1350,PAD=72,F=CARD_FONT,c=newCanvas(W,H),g=c.getContext('2d');
+  const pr=cardPricing(it,o),tbl=o.variants&&pr.rows?pr.rows.slice(0,6):null;
   g.font=`800 64px ${F}`;const nameL=capLines(wrapText(g,it.name||'',W-PAD*2),2);
-  const vars=o.variants?cardVariants(it):[];
+  const vars=o.variants&&!tbl?cardVariants(it):[];
   g.font=`600 32px ${F}`;const varL=vars.length?capLines(wrapText(g,'規格　'+vars.join(' / '),W-PAD*2),2):[];
-  g.font=`400 34px ${F}`;const noteL=o.note&&it.note?capLines(wrapText(g,it.note,W-PAD*2),5):[];
-  const badge=o.store&&it.store,nTxt=varL.length+noteL.length;
-  const block=48+(badge?46:0)+36+nameL.length*80+16+28+136+(nTxt?26+nTxt*50:0)+44;
-  const PH=Math.max(500,Math.min(840,H-block));
+  g.font=`400 34px ${F}`;const noteL=o.note&&it.note?capLines(wrapText(g,it.note,W-PAD*2),tbl?2:5):[];
+  const badge=o.store&&it.store,tblH=tbl?tbl.length*56:0,nTxt=varL.length+noteL.length;
+  const block=48+(badge?46:0)+36+nameL.length*80+16+28+136+((tbl||nTxt)?22:0)+tblH+nTxt*50+44;
+  const PH=Math.max(440,Math.min(840,H-block));
   g.fillStyle='#fff';g.fillRect(0,0,W,H);
   await drawPhoto(g,it,o,0,0,W,PH,0);
   g.textBaseline='top';g.textAlign='left';
@@ -125,8 +171,10 @@ async function cardMag(it,o){
   g.fillStyle='#111';g.font=`800 64px ${F}`;
   nameL.forEach(l=>{g.fillText(l,PAD,y);y+=80});
   y+=16;g.fillStyle='#e3e6e8';g.fillRect(PAD,y,W-PAD*2,2);y+=26;
-  drawPrice(g,PAD,y,it.price,{small:40,big:124,ws:500,wb:300,color:'#111',gap:14});y+=136;
-  if(nTxt)y+=26;
+  drawPrice(g,PAD,y,pr.price,{small:40,big:124,ws:500,wb:300,color:'#111',gap:14,suffix:pr.from?'起':''});y+=136;
+  if(tbl||nTxt)y+=22;
+  if(tbl)y=drawTable(g,tbl,PAD,y,W-PAD*2,{nf:`600 32px ${F}`,nc:'#111',pf:`700 32px ${F}`,pc:'#111',uf:`400 26px ${F}`,uc:'#868d93',uo:4,h:56,line:'#e3e6e8'});
+  g.textBaseline='top';
   g.font=`600 32px ${F}`;g.fillStyle='#111';varL.forEach(l=>{g.fillText(l,PAD,y);y+=50});
   g.font=`400 34px ${F}`;g.fillStyle='#50565c';noteL.forEach(l=>{g.fillText(l,PAD,y);y+=50});
   return c;
@@ -138,20 +186,23 @@ async function cardSoft(it,o){
   const tints=['#e8f0f6','#f4e9ef','#e7f2ea','#f2eee6'];
   const tint=tints[[...(it.name||'')].reduce((a,ch)=>a+ch.charCodeAt(0),0)%tints.length];
   const maxW=W-PAD*2;
+  const pr=cardPricing(it,o);
   g.font=`700 58px ${F}`;const nameL=capLines(wrapText(g,it.name||'',maxW),2);
-  const vars=o.variants?cardVariants(it):[];
-  const chipRows=vars.length?layoutChips(g,vars,maxW,`500 30px ${F}`,22,12,3):[];
-  g.font=`400 34px ${F}`;const noteL=o.note&&it.note?capLines(wrapText(g,it.note,maxW),4):[];
+  const labels=o.variants?(pr.rows?pr.rows.slice(0,6).map(r=>`${r.n}　NT$ ${fmt(r.p)}${r.u?'　'+r.u:''}`):cardVariants(it)):[];
+  const chipRows=labels.length?layoutChips(g,labels,maxW,`500 30px ${F}`,22,12,3):[];
+  g.font=`400 34px ${F}`;const noteL=o.note&&it.note?capLines(wrapText(g,it.note,maxW),chipRows.length>1?3:4):[];
   const badge=o.store&&it.store;
   const bottom=36+104+24+nameL.length*72+(chipRows.length?14+chipRows.length*64:0)+(noteL.length?16+noteL.length*50:0)+4;
-  const PH=Math.max(440,Math.min(780,H-PAD*2-bottom));
+  const PH=Math.max(400,Math.min(780,H-PAD*2-bottom));
   g.fillStyle=tint;g.fillRect(0,0,W,H);
   await drawPhoto(g,it,o,PAD,PAD,maxW,PH,48);
   g.textBaseline='top';g.textAlign='left';
   let y=PAD+PH+36;
-  const pw=drawPrice(g,0,0,it.price,{small:34,big:62,ws:700,wb:800,color:'#fff',gap:10},true)+64;
+  const po={small:34,big:62,ws:700,wb:800,color:'#fff',gap:10,suffix:pr.from?'起':''};
+  const pw=drawPrice(g,0,0,pr.price,po,true)+64;
   g.fillStyle=RED;rr(g,PAD,y,pw,104,52);g.fill();
-  drawPrice(g,PAD+32,y+22,it.price,{small:34,big:62,ws:700,wb:800,color:'#fff',gap:10});
+  drawPrice(g,PAD+32,y+22,pr.price,po);
+  g.textBaseline='top';
   if(badge){
     g.font=`600 32px ${F}`;const sw=Math.min(g.measureText(it.store).width+48,W-PAD*2-pw-16);
     g.fillStyle='#fff';rr(g,PAD+pw+16,y+24,sw,56,28);g.fill();
@@ -265,18 +316,21 @@ function mountImg(draw,filename){
 }
 async function exportSheet(id){
   const it=S.items.find(x=>x.id===id);if(!it)return;
-  const o={style:CARD_STYLES[S.meta.exportStyle]?S.meta.exportStyle:'clean',store:true,note:true,variants:true,fit:'cover'};
-  const chip=(k,l,on)=>`<button class="chip ${on?'on':''}" data-o="${k}">${l}</button>`;
+  const o={style:CARD_STYLES[S.meta.exportStyle]?S.meta.exportStyle:'clean',store:true,note:true,variants:true,unit:true,fit:'cover',collage:false,pi:0};
+  const photos=photosOf(it),chip=(k,l,on)=>`<button class="chip ${on?'on':''}" data-o="${k}">${l}</button>`;
   openSheet(shHead('匯出圖片')+`
     <div class="seg" id="stySeg">${[['clean','簡約'],['mag','雜誌'],['soft','柔色卡片']].map(([k,l])=>`<button type="button" data-s="${k}" class="${o.style===k?'on':''}">${l}</button>`).join('')}</div>
     <div class="expwrap"><img id="expImg" alt="商品圖片預覽"></div>
-    <div class="chips" id="optChips" style="margin-bottom:10px">${chip('store','顯示店名',1)}${chip('note','顯示細節',1)}${(it.variants||[]).length?chip('variants','顯示規格',1):''}${it.photo?chip('fit','照片完整顯示',0):''}</div>
-    <p class="hint">沒有跳出分享選單時，長按上面的圖片也能存到相簿。</p>
+    ${photos.length>1?`<div class="ph-strip" id="expPh">${photos.map((x,n)=>`<div class="ph-th${n===0?' main':''}" data-n="${n}" style="background-image:url('${x.t}')"></div>`).join('')}</div>`:''}
+    <div class="chips" id="optChips" style="margin-bottom:10px">${chip('store','顯示店名',1)}${chip('note','顯示細節',1)}${(it.variants||[]).length?chip('variants','顯示規格',1):''}${hasUnit(it)?chip('unit','顯示單價換算',1):''}${photos.length?chip('fit','照片完整顯示',0):''}${photos.length>1?chip('collage','拼貼多張照片',0):''}</div>
+    <p class="hint">${photos.length>1?'點縮圖選擇主圖。':''}沒有跳出分享選單時，長按上面的圖片也能存到相簿。</p>
     <div class="actions"><button class="btn" id="eDl">下載</button><button class="btn primary" id="eSh">分享 / 存到相簿</button></div>`);
   const redraw=mountImg(()=>CARD_STYLES[o.style](it,o),()=>safeName(it.name)+'.jpg');
   await redraw();
   $('#stySeg').onclick=async e=>{const b=e.target.closest('[data-s]');if(!b)return;o.style=b.dataset.s;setMeta('exportStyle',o.style);
     [...$('#stySeg').children].forEach(x=>x.classList.toggle('on',x===b));await redraw()};
+  if($('#expPh'))$('#expPh').onclick=async e=>{const th=e.target.closest('.ph-th');if(!th)return;o.pi=+th.dataset.n;o.collage=false;
+    [...$('#expPh').children].forEach(x=>x.classList.toggle('main',x===th));const cb=$('#optChips [data-o=collage]');if(cb)cb.classList.remove('on');await redraw()};
   $('#optChips').onclick=async e=>{const b=e.target.closest('[data-o]');if(!b)return;const k=b.dataset.o;
     if(k==='fit')o.fit=o.fit==='cover'?'contain':'cover';else o[k]=!o[k];
     b.classList.toggle('on',k==='fit'?o.fit==='contain':o[k]);await redraw()};
